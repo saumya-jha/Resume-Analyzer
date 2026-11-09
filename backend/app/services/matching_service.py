@@ -1,218 +1,195 @@
+"""Combines skill, project, experience and education scores into one result."""
+
 import re
-from datetime import date , datetime
-from app.schemas.matching_schema import (
-    MatchingResult,
-    SkillMatching,
-    ProjectMatching
+from datetime import date
+
+from app.schemas.matching_schema import MatchingResult, ProjectMatching
+from app.services.education_matching import evaluate_education
+from app.services.skill_matching import (
+    FULL,
+    PARTIAL,
+    build_candidate_profile,
+    calculate_percentage,
+    calculate_skill_score,
+    match_skill,
+    match_skills,
+    normalize_skill,
+    unique_required_skills,
 )
 
+# Names re-exported so older imports such as
+# `from app.services.matching_service import normalize_skill` keep working.
+__all__ = [
+    "normalize_skill",
+    "match_skills",
+    "calculate_skill_score",
+    "calculate_percentage",
+    "calculate_project_score",
+    "calculate_education_score",
+    "calculate_experience_score",
+    "get_total_experience_months",
+    "generate_suggestions",
+    "match_resume_with_job",
+]
 
-# Normalize different names for the same technology
-SKILL_ALIASES = {
-    "js": "javascript",
-    "javascript": "javascript",
-    "py": "python",
-    "postgres": "postgresql",
-    "postgresql": "postgresql",
-    "react.js": "react",
-    "reactjs": "react",
-    "node.js": "node.js",
-    "rest api": "rest apis",
-    "restful api": "rest apis",
-    "rest apis": "rest apis",
-    "machine learning": "machine learning",
-    "ml": "machine learning",
-    "ai": "artificial intelligence",
-    "artificial intelligence": "artificial intelligence",
-    "mongo": "mongodb",
-    "mongodb": "mongodb"
-}
-RELATED_SKILLS = {
-    "spring boot": {"java"},
-    "django": {"python"},
-    "pyramid": {"python"},
-    "orm": {"sqlalchemy", "hibernate"},
-    "aws": {"azure", "gcp"},
-    "azure": {"aws", "gcp"},
-    "gcp": {"aws", "azure"},
-    "html5": {"html/css"},
-    "rest apis": {"fastapi", "flask"}
+# How much each part counts towards the overall score
+WEIGHTS = {
+    "skills": 0.50,
+    "projects": 0.25,
+    "experience": 0.15,
+    "education": 0.10,
 }
 
 
-def normalize_skill(skill: str) -> str:
-    cleaned_skill = skill.strip().lower()
-    return SKILL_ALIASES.get(cleaned_skill, cleaned_skill)
-
-
-def match_skills(resume_skills, required_skills):
-
-    resume_normalized = {
-        normalize_skill(skill) for skill in resume_skills
-    }
-
-    matched = []
-    partially_matched = []
-    missing = []
-
-    for skill in required_skills:
-
-        normalized = normalize_skill(skill)
-
-        # Exact match
-        if normalized in resume_normalized:
-            matched.append(skill)
-
-        # Check for related skills
-        elif RELATED_SKILLS.get(normalized, set()) & resume_normalized:
-            partially_matched.append(skill)
-
-        # No exact or related skill found
-        else:
-            missing.append(skill)
-
-    return SkillMatching(
-        matched_skills=matched,
-        partially_matched_skills=partially_matched,
-        missing_skills=missing
-    )
-
-
-def calculate_percentage(matched, total):
-
-    if total == 0:
-        return 100.0
-
-    return round((matched / total) * 100, 2)
-
-
-def calculate_skill_score(skill_matching, total_required):
-
-    matched_count = len(skill_matching.matched_skills)
-
-    partial_count = len(
-        skill_matching.partially_matched_skills
-    )
-
-    weighted_count = matched_count + (partial_count * 0.5)
-
-    return calculate_percentage(
-        weighted_count,
-        total_required
-    )
+# --------------------------------------------------------------------------
+# Projects
+# --------------------------------------------------------------------------
 
 def calculate_project_score(projects, required_skills):
+    """Percentage of required skills that the projects demonstrate.
 
-    if not required_skills:
+    A skill used in a project (as a technology, or clearly mentioned in its
+    description) is worth 1 point; a closely related technology is worth 0.5.
+    """
+
+    required = unique_required_skills(required_skills)
+
+    if not required:
         return 100.0, ProjectMatching()
 
+    best_credit = {skill: 0.0 for skill in required}
     relevant_projects = []
     explanations = []
 
-    normalized_required = {
-        normalize_skill(skill): skill
-        for skill in required_skills
-    }
-
-    demonstrated_skills = set()
-
     for project in projects:
 
-        project_technologies = {
-            normalize_skill(tech)
-            for tech in project.technologies
-        }
+        profile = build_candidate_profile(
+            project.technologies,
+            f"{project.project_name} {project.description or ''}",
+        )
 
-        description = (project.description or "").lower()
+        demonstrated = []
+        related = []
 
-        project_matches = []
+        for skill in required:
 
-        for normalized_skill, original_skill in normalized_required.items():
+            result = match_skill(skill, profile)
 
-            # Check project technology list
-            technology_match = (
-                normalized_skill in project_technologies
-            )
+            if result == FULL:
+                demonstrated.append(skill)
+                best_credit[skill] = 1.0
 
-            # Check description using whole-word matching
-            description_match = bool(
-                re.search(
-                    r"(?<!\w)" + re.escape(normalized_skill) + r"(?!\w)",
-                    description
-                )
-            )
+            elif result == PARTIAL:
+                related.append(skill)
+                best_credit[skill] = max(best_credit[skill], 0.5)
 
-            if technology_match or description_match:
-
-                project_matches.append(original_skill)
-                demonstrated_skills.add(normalized_skill)
-
-        if project_matches:
+        if demonstrated or related:
 
             relevant_projects.append(project.project_name)
 
-            explanations.append(
-                f"{project.project_name} demonstrates: "
-                f"{', '.join(project_matches)}."
-            )
+            sentence = f"{project.project_name} "
 
-    score = calculate_percentage(
-        len(demonstrated_skills),
-        len(normalized_required)
-    )
+            if demonstrated:
+                sentence += f"demonstrates: {', '.join(demonstrated)}."
+
+            if related:
+                sentence += (
+                    ("" if not demonstrated else " ")
+                    + f"Related experience with: {', '.join(related)}."
+                )
+
+            explanations.append(sentence)
+
+    score = calculate_percentage(sum(best_credit.values()), len(required))
 
     return score, ProjectMatching(
         relevant_projects=relevant_projects,
-        relevance_explanation=explanations
+        relevance_explanation=explanations,
     )
 
 
-def parse_experience_date(value):
-    value = value.strip()
+# --------------------------------------------------------------------------
+# Experience
+# --------------------------------------------------------------------------
 
-    if value.lower() in ["present", "current", "now"]:
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+PRESENT_WORDS = {
+    "present", "current", "currently", "now", "ongoing", "today",
+    "till date", "to date", "date", "till now",
+}
+
+# "Jan 2023 - Mar 2024", "June 2022 to August 2022" (spaces required, so the
+# "to" inside "October" is never mistaken for a separator) ...
+_SPACED_RANGE = re.compile(r"\s+(?:-|–|—|to|until|till)\s+")
+# ... and "2022-2024", "01/2023-03/2024"
+_TIGHT_RANGE = re.compile(r"\s*(?:-|–|—)\s*")
+
+FRESHER_TERMS = (
+    "fresher",
+    "freshers",
+    "entry-level",
+    "entry level",
+    "no experience required",
+    "no prior experience",
+)
+
+
+def parse_experience_date(value):
+    """Turn "Jan 2024", "October 2023", "01/2024", "2024" or "Present" into a date."""
+
+    text = (value or "").strip().lower().strip("().,; ")
+
+    if text in PRESENT_WORDS:
         return date.today()
 
-    formats = [
-        "%b %Y",    # Jan 2024
-        "%B %Y",    # January 2024
-        "%m/%Y",    # 01/2024
-        "%Y"        # 2024
-    ]
+    try:
+        match = re.fullmatch(r"([a-z]{3,9})\.?,?\s*(\d{4})", text)
+        if match and match.group(1)[:3] in MONTHS:
+            return date(int(match.group(2)), MONTHS[match.group(1)[:3]], 1)
 
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
+        match = re.fullmatch(r"(\d{1,2})\s*[/.\-]\s*(\d{4})", text)
+        if match and 1 <= int(match.group(1)) <= 12:
+            return date(int(match.group(2)), int(match.group(1)), 1)
+
+        match = re.fullmatch(r"(\d{4})\s*[/.\-]\s*(\d{1,2})", text)
+        if match and 1 <= int(match.group(2)) <= 12:
+            return date(int(match.group(1)), int(match.group(2)), 1)
+
+        match = re.fullmatch(r"(\d{4})", text)
+        if match:
+            return date(int(match.group(1)), 1, 1)
+
+    except ValueError:
+        return None
 
     return None
 
-def parse_experience_date(value):
-    value = value.strip()
 
-    if value.lower() in ["present", "current", "now"]:
-        return date.today()
+def _split_date_range(duration: str):
 
-    formats = [
-        "%b %Y",    # Jan 2024
-        "%B %Y",    # January 2024
-        "%m/%Y",    # 01/2024
-        "%Y"        # 2024
-    ]
+    for pattern in (_SPACED_RANGE, _TIGHT_RANGE):
 
-    for fmt in formats:
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
+        parts = pattern.split(duration, maxsplit=1)
+
+        if len(parts) == 2:
+            return parts
 
     return None
 
 
 def get_total_experience_months(experiences):
+    """Total months of experience.
 
-    total_months = 0
+    Date ranges are merged first, so two jobs that overlap (an internship
+    during a part-time job) are not counted twice.
+    """
+
+    ranges = []
+    stated_months = 0
 
     for experience in experiences:
 
@@ -221,44 +198,92 @@ def get_total_experience_months(experiences):
         if not duration:
             continue
 
-        # First, try to identify a date range
-        date_range = re.search(
-            r"(.+?)\s*(?:-|–|—|to)\s*(.+)",
-            duration,
-            re.IGNORECASE
-        )
+        parts = _split_date_range(duration)
 
-        if date_range:
+        if parts:
 
-            start_date = parse_experience_date(date_range.group(1))
-            end_date = parse_experience_date(date_range.group(2))
+            start = parse_experience_date(parts[0])
+            end = parse_experience_date(parts[1])
 
-            if start_date and end_date and end_date >= start_date:
-
-                months = (
-                    (end_date.year - start_date.year) * 12
-                    + end_date.month - start_date.month
-                )
-
-                total_months += months
+            if start and end and end >= start:
+                ranges.append((
+                    start.year * 12 + start.month,
+                    end.year * 12 + end.month,
+                ))
                 continue
 
-        # Otherwise, try numeric durations
-        matches = re.findall(
+        # Durations such as "2 years", "6 months", "1.5 years"
+        for value, unit in re.findall(
             r"(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)",
-            duration
-        )
+            duration,
+        ):
+            amount = float(value)
 
-        for value, unit in matches:
+            stated_months += amount * 12 if unit.startswith(("year", "yr")) \
+                else amount
 
-            value = float(value)
+    ranges.sort()
+    merged = []
 
-            if unit.startswith(("year", "yr")):
-                total_months += value * 12
-            else:
-                total_months += value
+    for start, end in ranges:
 
-    return total_months
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    return sum(end - start for start, end in merged) + stated_months
+
+
+def parse_required_years(requirement: str):
+    """Minimum years of experience a job asks for, or None if no number is given."""
+
+    text = requirement.lower()
+
+    if any(term in text for term in FRESHER_TERMS):
+        return 0.0
+
+    # "2-4 years", "0 to 2 years" -> the lower number
+    match = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:-|–|—|to)\s*\d+(?:\.\d+)?\s*\+?\s*"
+        r"(?:years?|yrs?)",
+        text,
+    )
+    if match:
+        return float(match.group(1))
+
+    # "3 years", "5+ years", "at least 3 years"
+    match = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", text)
+    if match:
+        return float(match.group(1))
+
+    match = re.search(r"(\d+(?:\.\d+)?)\s*\+?\s*months?", text)
+    if match:
+        return float(match.group(1)) / 12
+
+    return None
+
+
+# "Less than 4 years", "up to 2 years", "3 years or less" state a MAXIMUM
+_MAXIMUM_WORDS = re.compile(
+    r"\b(?:less than|fewer than|under|up to|at most|no more than|"
+    r"maximum(?: of)?|max\.?)\s*\d"
+    r"|\d+(?:\.\d+)?\s*(?:years?|yrs?)?\s*(?:or less|or fewer|or under)",
+    re.IGNORECASE,
+)
+
+_MINIMUM_WORDS = re.compile(
+    r"\b(?:at least|minimum|min\.?|(?<!no )more than|over)\b", re.IGNORECASE
+)
+
+
+def is_maximum_only(requirement: str) -> bool:
+    """True when the job only caps experience (it does not ask for any)."""
+
+    return bool(
+        _MAXIMUM_WORDS.search(requirement)
+        and not _MINIMUM_WORDS.search(requirement)
+    )
 
 
 def calculate_experience_score(resume, experience_requirement):
@@ -266,214 +291,135 @@ def calculate_experience_score(resume, experience_requirement):
     if not experience_requirement:
         return 100.0
 
-    requirement = experience_requirement.lower()
-
-    fresher_terms = [
-        "fresher",
-        "freshers",
-        "entry-level",
-        "entry level",
-        "no experience required"
-    ]
-
-    if any(term in requirement for term in fresher_terms):
+    # A cap such as "less than 4 years" is met by anyone, including freshers
+    if is_maximum_only(experience_requirement):
         return 100.0
 
-    # Extract minimum required experience
-    range_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*years?",
-        requirement
-    )
+    minimum_years = parse_required_years(experience_requirement)
 
-    minimum_match = re.search(
-        r"(?:at least|minimum of|minimum|required)\s*(\d+(?:\.\d+)?)\s*years?",
-        requirement
-    )
-
-    plus_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*\+\s*years?",
-        requirement
-    )
-
-    if range_match:
-        minimum_years = float(range_match.group(1))
-
-    elif minimum_match:
-        minimum_years = float(minimum_match.group(1))
-
-    elif plus_match:
-        minimum_years = float(plus_match.group(1))
-
-    else:
-        zero_match = re.search(r"\b0\s*years?\b", requirement)
-
-        if zero_match:
-            return 100.0
-
+    if minimum_years is None:
+        # e.g. "Prior backend experience" - no number to compare against
         return 100.0 if resume.experience else 0.0
 
     if minimum_years == 0:
         return 100.0
 
-    candidate_months = get_total_experience_months(
-        resume.experience
-    )
+    candidate_months = get_total_experience_months(resume.experience)
 
-    required_months = minimum_years * 12
-
-    score = (candidate_months / required_months) * 100
+    score = candidate_months / (minimum_years * 12) * 100
 
     return round(min(score, 100.0), 2)
 
 
+def format_months(months: float) -> str:
+
+    whole = int(round(months))
+
+    years, remainder = divmod(whole, 12)
+
+    parts = []
+
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+
+    if remainder or not parts:
+        parts.append(f"{remainder} month{'s' if remainder != 1 else ''}")
+
+    return " ".join(parts)
+
+
+# --------------------------------------------------------------------------
+# Education
+# --------------------------------------------------------------------------
 
 def calculate_education_score(resume, education_requirement):
+    """Score only (0-100). See education_matching for the full explanation."""
 
-    if not education_requirement:
-        return 100.0
+    score, _ = evaluate_education(resume.education, education_requirement)
 
-    requirement = education_requirement.lower()
-
-    candidate_education = " ".join(
-        (education.degree or "").lower()
-        for education in resume.education
-    )
-
-    if not candidate_education.strip():
-        return 0.0
-
-    # Step 1: Identify degree levels
-    degree_levels = {
-        "bachelor": [
-            "bachelor",
-            "b.tech", "btech",
-            "b.e.", "b.e",
-            "b.sc", "bsc",
-            "b.s.", "bs",
-            "bca",
-            "undergraduate",
-            "bachelor of technology",
-            "bachelor of engineering",
-            "bachelor of science"
-        ],
-
-        "master": [
-            "master",
-            "m.tech", "mtech",
-            "m.e.", "m.e",
-            "m.sc", "msc",
-            "mca",
-            "postgraduate",
-            "master of technology",
-            "master of engineering",
-            "master of science"
-        ],
-
-        "phd": [
-            "phd",
-            "ph.d",
-            "doctorate",
-            "doctoral"
-        ]
-    }
-
-    def identify_level(text):
-
-        for level, keywords in degree_levels.items():
-
-            if any(keyword in text for keyword in keywords):
-                return level
-
-        return None
-
-    required_level = identify_level(requirement)
-    candidate_level = identify_level(candidate_education)
-
-    # Step 2: Identify relevant fields
-    field_categories = {
-        "computer_science": [
-            "computer science",
-            "computer science and engineering",
-            "cse",
-            "computer engineering"
-        ],
-
-        "information_technology": [
-            "information technology",
-            "information science",
-            "it"
-        ],
-
-        "software_engineering": [
-            "software engineering",
-            "software development"
-        ],
-
-        "computer_applications": [
-            "computer applications"
-        ]
-    }
-
-    def identify_field(text):
-
-        for field, keywords in field_categories.items():
-
-            if any(keyword in text for keyword in keywords):
-                return field
-
-        return None
-
-    required_field = identify_field(requirement)
-    candidate_field = identify_field(candidate_education)
-
-    # Step 3: Compare degree levels
-    level_matches = (
-        required_level is None
-        or candidate_level == required_level
-    )
-
-    # Step 4: Compare fields
-    if required_field is None:
-        field_matches = True
-
-    elif required_field == candidate_field:
-        field_matches = True
-
-    elif required_field == "computer_science" and candidate_field in [
-        "information_technology",
-        "software_engineering"
-    ]:
-        field_matches = True
-
-    else:
-        field_matches = False
-
-    # Step 5: Calculate score
-    if level_matches and field_matches:
-        return 100.0
-
-    if level_matches or field_matches:
-        return 50.0
-
-    return 0.0
+    return score
 
 
+# --------------------------------------------------------------------------
+# Suggestions
+# --------------------------------------------------------------------------
 
-def generate_suggestions(skill_matching):
+def _short_list(items, limit=8):
+
+    shown = ", ".join(items[:limit])
+
+    if len(items) > limit:
+        shown += f" and {len(items) - limit} more"
+
+    return shown
+
+
+def generate_suggestions(
+    skill_matching,
+    *,
+    project_score=100.0,
+    experience_score=100.0,
+    education_matching=None,
+    experience_requirement=None,
+    candidate_months=None,
+):
 
     suggestions = []
 
     if skill_matching.missing_skills:
         suggestions.append(
-            "Consider learning and practicing: "
-            + ", ".join(skill_matching.missing_skills)
+            "Missing skills: "
+            + _short_list(skill_matching.missing_skills)
+            + ". If you already know any of them, add them to your resume; "
+            "otherwise build a small project to gain hands-on experience."
         )
 
     if skill_matching.partially_matched_skills:
         suggestions.append(
-            "Build practical experience with: "
-            + ", ".join(skill_matching.partially_matched_skills)
+            "Turn related experience into direct experience with: "
+            + _short_list(skill_matching.partially_matched_skills)
         )
+
+    gaps = (
+        skill_matching.missing_skills
+        + skill_matching.partially_matched_skills
+    )
+
+    if project_score < 60 and gaps:
+        suggestions.append(
+            "Add or expand a project that uses: " + _short_list(gaps, 4)
+        )
+
+    if experience_score < 100 and experience_requirement:
+        message = (
+            "The role asks for "
+            + experience_requirement.strip().rstrip(".;, ")
+        )
+
+        if candidate_months is not None:
+            message += (
+                f"; your resume shows about {format_months(candidate_months)}"
+            )
+
+        suggestions.append(
+            message + ". Highlight internships, freelance or open-source "
+            "work to strengthen this."
+        )
+
+    if education_matching is not None:
+
+        if education_matching.level_met is False:
+            suggestions.append(
+                "The role asks for a "
+                f"{education_matching.required_level} degree. Mention "
+                "relevant certifications or coursework to offset this."
+            )
+
+        elif education_matching.field_relevance in ("adjacent", "unrelated"):
+            suggestions.append(
+                "Your field of study differs from what the role asks for. "
+                "Emphasise relevant coursework, projects or certifications."
+            )
 
     if not suggestions:
         suggestions.append(
@@ -483,62 +429,95 @@ def generate_suggestions(skill_matching):
     return suggestions
 
 
+# --------------------------------------------------------------------------
+# Overall match
+# --------------------------------------------------------------------------
+
+def _resume_evidence(resume):
+    """Return (skills the resume lists, free text that can prove other skills)."""
+
+    listed_skills = list(resume.technical_skills)
+
+    for project in resume.projects:
+        listed_skills.extend(project.technologies)
+
+    pieces = []
+
+    for project in resume.projects:
+        pieces.extend([project.project_name, project.description or ""])
+
+    for experience in resume.experience:
+        pieces.append(experience.job_title or "")
+        pieces.extend(experience.responsibilities)
+
+    pieces.extend(resume.certifications)
+
+    return listed_skills, "\n".join(pieces)
+
+
 def match_resume_with_job(resume, job):
 
+    listed_skills, evidence_text = _resume_evidence(resume)
+
     skill_matching = match_skills(
-        resume.technical_skills,
-        job.required_skills
+        listed_skills,
+        job.required_skills,
+        evidence_text,
     )
 
-    skill_score = calculate_skill_score(
-        skill_matching,
-        len(job.required_skills)
-    )
+    skill_score = calculate_skill_score(skill_matching)
 
     project_score, project_matching = calculate_project_score(
         resume.projects,
-        job.required_skills
+        job.required_skills,
     )
 
     experience_score = calculate_experience_score(
         resume,
-        job.experience_requirement
+        job.experience_requirement,
     )
 
-    education_score = calculate_education_score(
-        resume,
-        job.education_requirement
+    candidate_months = get_total_experience_months(resume.experience)
+
+    education_score, education_matching = evaluate_education(
+        resume.education,
+        job.education_requirement,
     )
 
     overall_score = round(
-        skill_score * 0.50
-        + project_score * 0.25
-        + experience_score * 0.15
-        + education_score * 0.10,
-        2
+        skill_score * WEIGHTS["skills"]
+        + project_score * WEIGHTS["projects"]
+        + experience_score * WEIGHTS["experience"]
+        + education_score * WEIGHTS["education"],
+        2,
     )
 
     strengths = []
 
     if skill_matching.matched_skills:
         strengths.append(
-        "Exact skill matches: "
-        + ", ".join(skill_matching.matched_skills)
-    )
+            "Exact skill matches: " + ", ".join(skill_matching.matched_skills)
+        )
 
     if skill_matching.partially_matched_skills:
         strengths.append(
-        "Related skills: "
-        + ", ".join(skill_matching.partially_matched_skills)
-    )
+            "Related skills: "
+            + ", ".join(skill_matching.partially_matched_skills)
+        )
 
     if project_matching.relevant_projects:
         strengths.append(
-        "Relevant projects: "
-        + ", ".join(project_matching.relevant_projects)
-    )
+            "Relevant projects: "
+            + ", ".join(project_matching.relevant_projects)
+        )
 
-    result = MatchingResult(
+    if job.experience_requirement and experience_score >= 100:
+        strengths.append("Meets the experience requirement.")
+
+    if job.education_requirement and education_score >= 100:
+        strengths.append("Meets the education requirement.")
+
+    return MatchingResult(
         overall_score=overall_score,
         skill_score=skill_score,
         project_score=project_score,
@@ -546,8 +525,14 @@ def match_resume_with_job(resume, job):
         education_score=education_score,
         skill_matching=skill_matching,
         project_matching=project_matching,
+        education_matching=education_matching,
         strengths=strengths,
-        improvement_suggestions=generate_suggestions(skill_matching)
+        improvement_suggestions=generate_suggestions(
+            skill_matching,
+            project_score=project_score,
+            experience_score=experience_score,
+            education_matching=education_matching,
+            experience_requirement=job.experience_requirement,
+            candidate_months=candidate_months,
+        ),
     )
-
-    return result

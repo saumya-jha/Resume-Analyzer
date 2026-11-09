@@ -5,32 +5,38 @@ class JobDescription(BaseModel):
 
     job_title: str = Field(
         min_length=2,
+        max_length=200,
         description="Title of the job"
     )
 
-    company_name: str | None = None
+    # Optional. A blank value (for example an empty form field) means "none".
+    company_name: str | None = Field(
+        default=None,
+        max_length=200,
+    )
 
     job_description: str = Field(
         min_length=50,
+        max_length=20000,
         description="Full job description"
     )
 
-    # Clean unnecessary spaces before validation
-    @field_validator("job_title", "job_description", "company_name", mode="before")
+    # Remove surrounding spaces before the length rules are checked, so a
+    # value made only of spaces is rejected by min_length.
+    @field_validator("job_title", "job_description", mode="before")
     @classmethod
-    def clean_whitespace(cls, value):
+    def strip_whitespace(cls, value):
 
         if isinstance(value, str):
             return value.strip()
 
         return value
 
-    # Reject empty or whitespace-only values
-    @field_validator("job_title", "job_description","company_name")
+    @field_validator("company_name", mode="before")
     @classmethod
-    def validate_not_empty(cls, value):
+    def blank_company_is_none(cls, value):
 
-        if not value.strip():
-            raise ValueError("This field cannot contain only spaces.")
+        if isinstance(value, str):
+            value = value.strip()
 
-        return value
+        return value or None

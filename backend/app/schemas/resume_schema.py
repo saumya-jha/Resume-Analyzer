@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class Education(BaseModel):
 
     degree: str | None = None
+    field_of_study: str | None = None
     institution: str | None = None
     graduation_year: str | None = None
 

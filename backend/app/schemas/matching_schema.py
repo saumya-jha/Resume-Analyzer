@@ -17,6 +17,26 @@ class ProjectMatching(BaseModel):
     relevance_explanation: list[str] = Field(default_factory=list)
 
 
+class EducationMatching(BaseModel):
+    """Explains how the education score was reached."""
+
+    required_level: str | None = None
+
+    candidate_level: str | None = None
+
+    required_fields: list[str] = Field(default_factory=list)
+
+    candidate_fields: list[str] = Field(default_factory=list)
+
+    # True / False when known, None when the level could not be determined
+    level_met: bool | None = None
+
+    # not_required | unknown | match | related | adjacent | unrelated
+    field_relevance: str | None = None
+
+    explanation: str = ""
+
+
 class MatchingResult(BaseModel):
 
     overall_score: float = Field(ge=0, le=100)
@@ -32,6 +52,10 @@ class MatchingResult(BaseModel):
     skill_matching: SkillMatching
 
     project_matching: ProjectMatching
+
+    education_matching: EducationMatching = Field(
+        default_factory=EducationMatching
+    )
 
     strengths: list[str] = Field(default_factory=list)
 
