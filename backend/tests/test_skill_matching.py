@@ -267,3 +267,36 @@ def test_ai_coding_tools_with_named_examples():
     assert match_skills(["Cursor"], [required]).matched_skills == [required]
     assert match_skills(["GitHub Copilot"], [required]).matched_skills == [required]
     assert match_skills(["Java"], [required]).missing_skills == [required]
+
+
+# ---- filler words around a skill ------------------------------------------
+
+@pytest.mark.parametrize("wording, expected", [
+    ("Python basics", "python"),
+    ("Basic Python", "python"),
+    ("Python programming", "python"),
+    ("Knowledge of Python", "python"),
+    ("SQL fundamentals", "sql"),
+    ("Java development", "java"),
+    ("React.js experience", "react"),
+    ("Proficiency in Flask", "flask"),
+    ("Strong Python skills", "python"),
+])
+def test_filler_words_around_a_skill_are_ignored(wording, expected):
+    assert normalize_skill(wording) == expected
+
+
+@pytest.mark.parametrize("wording", [
+    "Web development", "Software development", "Communication skills",
+])
+def test_filler_words_do_not_invent_skills(wording):
+    # What is left ("web", "software", "communication") is not a skill we
+    # know, so the phrase stays as it was written
+    assert normalize_skill(wording) == wording.lower()
+
+
+def test_python_basics_counts_when_the_resume_has_python():
+    result = match_skills(["Python", "FastAPI"], ["Python basics"])
+
+    assert result.matched_skills == ["Python basics"]
+    assert not result.missing_skills

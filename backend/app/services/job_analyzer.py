@@ -24,6 +24,9 @@ def analyze_job_description(job_description: str) -> JobRequirements:
        If the job accepts ONE of several alternatives (for example
        "AWS, Azure or GCP"), return them as a single item joined with
        " or ", such as "AWS or Azure or GCP". Do not list them separately.
+       Return only the core skill name, without level or filler words.
+       Write "Python", not "Python basics", "Basic Python",
+       "Python programming" or "Knowledge of Python".
 
     2. experience_requirement:
        Extract the required years of experience exactly as written

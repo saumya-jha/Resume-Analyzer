@@ -268,6 +268,36 @@ PATTERN_ALIASES = [
     (re.compile(r"\b(?:llms?|large language models?)\b"), "llm"),
 ]
 
+# Filler words job posts put around a skill name ("Python basics",
+# "Knowledge of SQL"). They are removed only when what is left is a known skill.
+_QUALIFIER_PREFIXES = [
+    "working knowledge of", "hands-on experience with", "hands on experience with",
+    "hands-on experience in", "hands on experience in", "practical knowledge of",
+    "knowledge of", "proficiency in", "proficient in", "experience with",
+    "experience in", "familiarity with", "familiar with", "understanding of",
+    "expertise in", "exposure to", "good", "strong", "solid", "basic", "basics of",
+    "fundamentals of", "fundamental", "core", "advanced", "intermediate", "hands-on",
+]
+_QUALIFIER_SUFFIXES = [
+    "basics", "basic", "fundamentals", "fundamental", "programming", "development",
+    "concepts", "skills", "experience", "knowledge", "proficiency", "expertise",
+    "language", "framework", "library",
+]
+_PREFIX_RE = re.compile(r"^(?:" + "|".join(re.escape(p) for p in _QUALIFIER_PREFIXES) + r")\s+")
+_SUFFIX_RE = re.compile(r"\s+(?:" + "|".join(re.escape(s) for s in _QUALIFIER_SUFFIXES) + r")$")
+
+
+def _strip_qualifiers(text: str) -> str:
+    previous = None
+
+    while previous != text:
+        previous = text
+        text = _PREFIX_RE.sub("", text)
+        text = _SUFFIX_RE.sub("", text)
+
+    return text.strip()
+
+
 # Skills written with a slash that must NOT be split into two skills
 KEEP_TOGETHER = {"ci/cd", "tcp/ip", "ui/ux", "pl/sql", "a/b testing", "i/o"}
 
@@ -333,6 +363,20 @@ def normalize_skill(skill: str) -> str:
     for pattern, canonical in PATTERN_ALIASES:
         if pattern.search(text):
             return canonical
+
+    # "Python basics", "Knowledge of SQL", "Java development": drop the filler
+    # words and keep the result only if it is a skill we know
+    core = _strip_qualifiers(text)
+
+    if core and core != text:
+        if core in ALIASES:
+            return ALIASES[core]
+
+        if _nospace(core) in _NOSPACE_ALIASES:
+            return _NOSPACE_ALIASES[_nospace(core)]
+
+        if core in KNOWN_SKILLS:
+            return core
 
     return text
 
